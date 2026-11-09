@@ -1,0 +1,196 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Digit Scanner</title>
+<style>
+  :root {
+    --bg: #0e1116; --panel: #161b22; --line: #262d38; --text: #e6e9ee; --mute: #8b95a5;
+    --hi: #2ec4a6; --lo: #ef5b5b; --bar: #3d7be0; --cur: #f5b942;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text); font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; }
+  main { max-width: 720px; margin: 0 auto; padding: 16px; }
+  h1 { font-size: 22px; margin: 8px 0 14px; }
+  .controls { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 14px; }
+  select { background: var(--panel); color: var(--text); border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; font-size: 15px; }
+  .status { margin-left: auto; align-self: center; font-size: 13px; color: var(--mute); }
+  .status.live { color: var(--hi); }
+  .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 14px; margin-bottom: 14px; }
+  .price { display: flex; justify-content: space-between; align-items: baseline; }
+  .price b { font-size: 26px; font-variant-numeric: tabular-nums; }
+  .price b span { color: var(--cur); }
+  .bars { display: grid; grid-template-columns: repeat(10, 1fr); gap: 6px; align-items: end; height: 220px; margin-top: 10px; }
+  .col { display: flex; flex-direction: column; justify-content: flex-end; align-items: center; height: 100%; }
+  .bar { width: 100%; background: var(--bar); border-radius: 5px 5px 0 0; min-height: 3px; transition: height .25s; }
+  .col.hi .bar { background: var(--hi); }
+  .col.lo .bar { background: var(--lo); }
+  .pct { font-size: 11px; margin-bottom: 4px; font-variant-numeric: tabular-nums; color: var(--mute); }
+  .col.hi .pct { color: var(--hi); } .col.lo .pct { color: var(--lo); }
+  .dg { margin-top: 6px; width: 100%; text-align: center; font-weight: 700; padding: 4px 0; border-radius: 6px; border: 2px solid transparent; }
+  .col.now .dg { border-color: var(--cur); color: var(--cur); }
+  .stats { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+  .stat small { color: var(--mute); display: block; margin-bottom: 4px; }
+  .stat b { font-size: 18px; font-variant-numeric: tabular-nums; }
+  .strip { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 8px; }
+  .strip i { font-style: normal; width: 26px; height: 26px; display: grid; place-items: center; border-radius: 6px; font-size: 13px; background: var(--line); }
+  .strip i.e { background: #1d3a5f; } .strip i.o { background: #4a2a3a; }
+  .alert { display: none; border-color: var(--cur); color: var(--cur); }
+  .alert.on { display: block; }
+  .note { font-size: 12px; color: var(--mute); line-height: 1.5; }
+  label.tog { display: flex; gap: 8px; align-items: center; font-size: 14px; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Digit Scanner</h1>
+
+  <div class="controls">
+    <select id="symbol" aria-label="Market">
+      <option value="R_10">Volatility 10</option>
+      <option value="R_25">Volatility 25</option>
+      <option value="R_50">Volatility 50</option>
+      <option value="R_75">Volatility 75</option>
+      <option value="R_100" selected>Volatility 100</option>
+      <option value="1HZ10V">Volatility 10 (1s)</option>
+      <option value="1HZ25V">Volatility 25 (1s)</option>
+      <option value="1HZ50V">Volatility 50 (1s)</option>
+      <option value="1HZ75V">Volatility 75 (1s)</option>
+      <option value="1HZ100V">Volatility 100 (1s)</option>
+    </select>
+    <select id="count" aria-label="Number of ticks">
+      <option value="100">Last 100 ticks</option>
+      <option value="500">Last 500 ticks</option>
+      <option value="1000" selected>Last 1000 ticks</option>
+    </select>
+    <span class="status" id="status">Connecting...</span>
+  </div>
+
+  <div class="panel">
+    <div class="price"><span class="note">Latest tick</span><b id="price">-</b></div>
+    <div class="bars" id="bars"></div>
+  </div>
+
+  <div class="panel alert" id="alert"></div>
+
+  <div class="panel stats">
+    <div class="stat"><small>Even</small><b id="even">-</b></div>
+    <div class="stat"><small>Odd</small><b id="odd">-</b></div>
+    <div class="stat"><small>Over 4 (5-9)</small><b id="over">-</b></div>
+    <div class="stat"><small>Under 5 (0-4)</small><b id="under">-</b></div>
+  </div>
+
+  <div class="panel">
+    <div class="note">Last 40 digits (blue = even, pink = odd)</div>
+    <div class="strip" id="strip"></div>
+  </div>
+
+  <div class="panel">
+    <label class="tog"><input type="checkbox" id="alertOn" checked> Alert when a digit is 5 or more in a row</label>
+  </div>
+
+  <p class="note">This page counts past digits. It does not predict the next one. Deriv's synthetic indices are random, so every digit has the same chance on every tick. Only trade money you can afford to lose.</p>
+</main>
+
+<script>
+(function () {
+  var APP_ID = 1089; // Deriv's public test app id. Replace with your own from api.deriv.com when you have one.
+  var ws = null, pip = 2, digits = [], maxLen = 1000;
+
+  var el = function (id) { return document.getElementById(id); };
+  var barsEl = el('bars');
+
+  for (var i = 0; i < 10; i++) {
+    barsEl.insertAdjacentHTML('beforeend',
+      '<div class="col" id="c' + i + '"><div class="pct" id="p' + i + '">0%</div>' +
+      '<div class="bar" id="b' + i + '" style="height:3px"></div><div class="dg">' + i + '</div></div>');
+  }
+
+  function digitOf(price) { return Number(String(Number(price).toFixed(pip)).slice(-1)); }
+
+  function render() {
+    var n = digits.length || 1, c = Array(10).fill(0), k;
+    digits.forEach(function (d) { c[d]++; });
+    var max = Math.max.apply(null, c), min = Math.min.apply(null, c);
+    var last = digits[digits.length - 1];
+    for (k = 0; k < 10; k++) {
+      var pct = c[k] / n * 100;
+      el('p' + k).textContent = pct.toFixed(1) + '%';
+      el('b' + k).style.height = Math.max(3, pct * 1.8 * 4 / 4) + 'px';
+      var col = el('c' + k);
+      col.className = 'col' + (c[k] === max ? ' hi' : c[k] === min ? ' lo' : '') + (k === last ? ' now' : '');
+    }
+    var ev = digits.filter(function (d) { return d % 2 === 0; }).length;
+    var ov = digits.filter(function (d) { return d >= 5; }).length;
+    el('even').textContent = (ev / n * 100).toFixed(1) + '%';
+    el('odd').textContent = ((n - ev) / n * 100).toFixed(1) + '%';
+    el('over').textContent = (ov / n * 100).toFixed(1) + '%';
+    el('under').textContent = ((n - ov) / n * 100).toFixed(1) + '%';
+
+    el('strip').innerHTML = digits.slice(-40).map(function (d) {
+      return '<i class="' + (d % 2 === 0 ? 'e' : 'o') + '">' + d + '</i>';
+    }).join('');
+
+    // streak alert
+    var a = el('alert'), s = 1;
+    while (s < digits.length && digits[digits.length - 1 - s] === last) s++;
+    var eo = 1, parity = last % 2;
+    while (eo < digits.length && digits[digits.length - 1 - eo] % 2 === parity) eo++;
+    var msg = '';
+    if (s >= 3) msg = 'Digit ' + last + ' appeared ' + s + ' times in a row.';
+    else if (eo >= 5) msg = eo + ' ' + (parity ? 'odd' : 'even') + ' digits in a row.';
+    if (el('alertOn').checked && msg) { a.textContent = msg; a.className = 'panel alert on'; }
+    else { a.className = 'panel alert'; }
+  }
+
+  function setStatus(text, live) {
+    var s = el('status'); s.textContent = text; s.className = 'status' + (live ? ' live' : '');
+  }
+
+  function connect() {
+    if (ws) { ws.onclose = null; try { ws.close(); } catch (e) {} }
+    digits = [];
+    maxLen = Number(el('count').value);
+    setStatus('Connecting...', false);
+    ws = new WebSocket('wss://ws.derivws.com/websockets/v3?app_id=' + APP_ID);
+
+    ws.onopen = function () {
+      ws.send(JSON.stringify({
+        ticks_history: el('symbol').value, count: maxLen, end: 'latest',
+        style: 'ticks', subscribe: 1
+      }));
+    };
+
+    ws.onmessage = function (ev) {
+      var d = JSON.parse(ev.data);
+      if (d.error) { setStatus('Error: ' + d.error.message, false); return; }
+      if (d.history) {
+        pip = d.pip_size || 2;
+        digits = d.history.prices.map(digitOf);
+        setStatus('Live', true);
+        render();
+      } else if (d.tick) {
+        pip = d.tick.pip_size || pip;
+        digits.push(digitOf(d.tick.quote));
+        if (digits.length > maxLen) digits.shift();
+        var q = Number(d.tick.quote).toFixed(pip);
+        el('price').innerHTML = q.slice(0, -1) + '<span>' + q.slice(-1) + '</span>';
+        render();
+      }
+    };
+
+    ws.onclose = function () {
+      setStatus('Disconnected. Reconnecting...', false);
+      setTimeout(connect, 2000);
+    };
+  }
+
+  el('symbol').onchange = connect;
+  el('count').onchange = connect;
+  el('alertOn').onchange = render;
+  connect();
+})();
+</script>
+</body>
+</html>
